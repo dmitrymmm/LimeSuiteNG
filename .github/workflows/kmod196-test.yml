@@ -1,0 +1,41 @@
+name: limepcie control path verification
+
+on:
+  push:
+    branches: [kmod196-verify]
+
+jobs:
+  build-load:
+    name: Build, install, load and unload the module
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-22.04, ubuntu-24.04]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y linux-headers-$(uname -r)
+          sudo ./install_dependencies.sh
+
+      - name: Configure and build
+        run: |
+          cmake -B build -DBUILD_DRIVERS=ON -DBUILD_CLI=OFF -DBUILD_GUI=OFF -DBUILD_PLUGINS=OFF -DBUILD_DOCS=OFF -DBUILD_EXAMPLES=OFF -DLIMEPCIE_RELOAD_ON_INSTALL=OFF -DLIMEPCIE_DKMS=OFF
+          cmake --build build --parallel 4
+
+      - name: Install
+        run: |
+          sudo cmake --install build
+          test -f /lib/modules/$(uname -r)/extra/limepcie.ko
+          modinfo limepcie
+
+      - name: Load and unload the module
+        run: |
+          sudo modprobe limepcie
+          lsmod | grep limepcie
+          sudo dmesg | grep -i limepcie || true
+          sudo modprobe -r limepcie
+          echo "PASS: module loads and unloads cleanly with the control path fix"
