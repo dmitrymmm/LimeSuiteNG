@@ -1,0 +1,141 @@
+name: limepcie kernel check verification
+
+on:
+  push:
+    branches: [kmod-verify]
+
+env:
+  CONFIGURE_FLAGS: -DBUILD_DRIVERS=ON -DBUILD_CLI=OFF -DBUILD_GUI=OFF -DBUILD_PLUGINS=OFF -DBUILD_DOCS=OFF -DBUILD_EXAMPLES=OFF -DLIMEPCIE_RELOAD_ON_INSTALL=OFF -DLIMEPCIE_DKMS=OFF
+
+jobs:
+  matching-kernel:
+    name: Matching kernel installs fine
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y linux-headers-$(uname -r)
+          sudo ./install_dependencies.sh
+
+      - name: Configure and build
+        run: |
+          cmake -B build ${{ env.CONFIGURE_FLAGS }}
+          cmake --build build --parallel 4
+          modinfo -F vermagic build/drivers/linux/limepcie/limepcie-*/limepcie.ko | grep -F "$(uname -r)"
+
+      - name: Install and verify module location
+        run: |
+          sudo cmake --install build
+          test -f /lib/modules/$(uname -r)/extra/limepcie.ko
+          modinfo limepcie
+
+  kernel-update-rebuilds:
+    name: Kernel change triggers rebuild for the active kernel
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install headers for both kernels
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y linux-headers-$(uname -r)
+          pkg=$(apt-cache search --names-only '^linux-headers-[0-9].*-generic$' | awk '{print $1}' | sort -V | tail -1)
+          echo "using $pkg"
+          sudo apt-get install -y "$pkg"
+          ver=${pkg#linux-headers-}
+          echo "FAKE_RELEASE=$ver" >> "$GITHUB_ENV"
+          sudo mkdir -p /lib/modules/$ver
+          test -e /lib/modules/$ver/build || sudo ln -s /usr/src/linux-headers-$ver /lib/modules/$ver/build
+          sudo ./install_dependencies.sh
+
+      - name: Configure and build as if running the old kernel
+        run: |
+          mkdir shim
+          echo '#!/bin/sh' > shim/uname
+          echo "if [ \"\$1\" = \"-r\" ]; then echo $FAKE_RELEASE; else exec /usr/bin/uname \"\$@\"; fi" >> shim/uname
+          chmod +x shim/uname
+          PATH="$PWD/shim:$PATH" cmake -B build ${{ env.CONFIGURE_FLAGS }}
+          PATH="$PWD/shim:$PATH" cmake --build build --parallel 4
+          modinfo -F vermagic build/drivers/linux/limepcie/limepcie-*/limepcie.ko | grep -F "$FAKE_RELEASE"
+
+      - name: Install after the kernel change rebuilds and installs correctly
+        run: |
+          sudo cmake --build build --target install
+          test -f /lib/modules/$(uname -r)/extra/limepcie.ko
+          modinfo -F vermagic /lib/modules/$(uname -r)/extra/limepcie.ko | grep -F "$(uname -r)"
+          test ! -e /lib/modules/$FAKE_RELEASE/extra/limepcie.ko
+          modinfo limepcie
+          echo "PASS: module was rebuilt for the active kernel and installed into its directory"
+
+  install-without-build-refused:
+    name: Plain cmake install of a stale module is refused
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install headers for both kernels
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y linux-headers-$(uname -r)
+          pkg=$(apt-cache search --names-only '^linux-headers-[0-9].*-generic$' | awk '{print $1}' | sort -V | tail -1)
+          sudo apt-get install -y "$pkg"
+          ver=${pkg#linux-headers-}
+          echo "FAKE_RELEASE=$ver" >> "$GITHUB_ENV"
+          sudo mkdir -p /lib/modules/$ver
+          test -e /lib/modules/$ver/build || sudo ln -s /usr/src/linux-headers-$ver /lib/modules/$ver/build
+          sudo ./install_dependencies.sh
+
+      - name: Configure and build as if running the old kernel
+        run: |
+          mkdir shim
+          echo '#!/bin/sh' > shim/uname
+          echo "if [ \"\$1\" = \"-r\" ]; then echo $FAKE_RELEASE; else exec /usr/bin/uname \"\$@\"; fi" >> shim/uname
+          chmod +x shim/uname
+          PATH="$PWD/shim:$PATH" cmake -B build ${{ env.CONFIGURE_FLAGS }}
+          PATH="$PWD/shim:$PATH" cmake --build build --parallel 4
+
+      - name: Install without rebuilding must fail with a clear message
+        run: |
+          set +e
+          out=$(sudo cmake --install build 2>&1)
+          rc=$?
+          echo "$out"
+          if [ $rc -eq 0 ]; then echo "FAIL: install unexpectedly succeeded"; exit 1; fi
+          echo "$out" | grep -q "was built for kernel" || { echo "FAIL: clear message missing"; exit 1; }
+          if [ -e "/lib/modules/$(uname -r)/extra/limepcie.ko" ]; then echo "FAIL: stale module was installed"; exit 1; fi
+          echo "PASS: stale module install refused with a clear diagnosis"
+
+  manual-values-untouched:
+    name: Manually set kernel release is used as is
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install headers for both kernels
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y linux-headers-$(uname -r)
+          pkg=$(apt-cache search --names-only '^linux-headers-[0-9].*-generic$' | awk '{print $1}' | sort -V | tail -1)
+          sudo apt-get install -y "$pkg"
+          ver=${pkg#linux-headers-}
+          echo "FAKE_RELEASE=$ver" >> "$GITHUB_ENV"
+          sudo mkdir -p /lib/modules/$ver
+          test -e /lib/modules/$ver/build || sudo ln -s /usr/src/linux-headers-$ver /lib/modules/$ver/build
+          sudo ./install_dependencies.sh
+
+      - name: Configure with a manually set kernel release
+        run: |
+          cmake -B build ${{ env.CONFIGURE_FLAGS }} -DKMOD_KERNEL_RELEASE=$FAKE_RELEASE
+          cmake --build build --parallel 4
+          modinfo -F vermagic build/drivers/linux/limepcie/limepcie-*/limepcie.ko | grep -F "$FAKE_RELEASE"
+
+      - name: Install rules must use the manual value without any uname resolution
+        run: |
+          grep -q "/lib/modules/$FAKE_RELEASE/extra" build/drivers/linux/limepcie/cmake_install.cmake
+          if grep -q "CURRENT_KERNEL_RELEASE" build/drivers/linux/limepcie/cmake_install.cmake; then
+            echo "FAIL: manual mode still resolves the kernel at install time"; exit 1
+          fi
+          echo "PASS: manual kernel release is used as is"
