@@ -265,16 +265,23 @@ bool UnixUsb::Connect(uint16_t vid, uint16_t pid, const char* serial)
             continue;
 
         int openStatus = libusb_open(devs[i], &dev_handle);
-        switch (openStatus)
+        if (openStatus != LIBUSB_SUCCESS)
         {
-        case LIBUSB_ERROR_ACCESS:
-            lime::error("Insufficient permissions to open USB device");
-            break;
-        case LIBUSB_ERROR_NO_MEM:
-            lime::error("USB device memory allocation failed");
-            break;
-        case LIBUSB_ERROR_NO_DEVICE:
-            lime::error("Expected device has been disconnected");
+            switch (openStatus)
+            {
+            case LIBUSB_ERROR_ACCESS:
+                lime::error("Insufficient permissions to open USB device");
+                break;
+            case LIBUSB_ERROR_NO_MEM:
+                lime::error("USB device memory allocation failed");
+                break;
+            case LIBUSB_ERROR_NO_DEVICE:
+                lime::error("Expected device has been disconnected");
+                break;
+            }
+            // on failure dev_handle is left null, skip this device instead of
+            // dereferencing it below
+            dev_handle = nullptr;
             continue;
         }
 
