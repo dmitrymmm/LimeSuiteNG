@@ -18,7 +18,7 @@ typedef struct lime_GPIO lime_GPIO;
 /**
  * @brief Sets the state of a single GPIO pin.
  * @param gpio The GPIO subinterface.
- * @param pin The pin index.
+ * @param pin The pin index (0-7).
  * @param value The pin state to set.
  * @return The status of the operation.
  */
@@ -27,7 +27,7 @@ LIME_API lime_OpStatus lime_gpio_set_value(lime_GPIO* gpio, uint32_t pin, bool v
 /**
  * @brief Reads the state of a single GPIO pin.
  * @param gpio The GPIO subinterface.
- * @param pin The pin index.
+ * @param pin The pin index (0-7).
  * @param[out] value The pin state read.
  * @return The status of the operation.
  */
