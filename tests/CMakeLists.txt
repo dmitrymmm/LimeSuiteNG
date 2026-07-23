@@ -60,6 +60,8 @@ target_sources(
 add_executable(c-api-consumer api/consumer_c99.c)
 set_target_properties(c-api-consumer PROPERTIES C_STANDARD 99 C_STANDARD_REQUIRED ON)
 target_link_libraries(c-api-consumer PRIVATE limesuiteng)
+# run it too, so its NULL-handling and enumerate checks are exercised in CI
+add_test(NAME c-api-consumer COMMAND c-api-consumer)
 
 add_subdirectory(embedded/lms7002m)
 
