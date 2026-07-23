@@ -415,6 +415,12 @@ int main(int argc, char** argv)
     const int txSamplesInPacket = args::get(txSamplesInPacketFlag);
     const int rxPacketsInBatch = args::get(rxPacketsInBatchFlag);
     const int txPacketsInBatch = args::get(txPacketsInBatchFlag);
+    const int fftSize = args::get(fftSizeFlag);
+    if (fftSize <= 0)
+    {
+        cerr << "Invalid --fftSize "sv << fftSize << " (must be positive)."sv << endl;
+        return EXIT_FAILURE;
+    }
 
     std::vector<int> chipIndexes = ParseIntArray(chipFlag);
 
@@ -544,7 +550,6 @@ int main(int argc, char** argv)
 
     signal(SIGINT, intHandler);
 
-    const int fftSize = args::get(fftSizeFlag);
     std::vector<complex16_t> rxData[16];
     for (int i = 0; i < 16; ++i)
         rxData[i].resize(fftSize);
