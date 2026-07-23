@@ -15,32 +15,45 @@ extern "C" {
 
 int lime_enumerate(lime_DeviceHandle* out, size_t max)
 {
-    const std::vector<lime::DeviceHandle> handles = lime::DeviceRegistry::enumerate();
-    if (out != nullptr)
+    try
     {
-        const size_t n = handles.size() < max ? handles.size() : max;
-        for (size_t i = 0; i < n; ++i)
+        const std::vector<lime::DeviceHandle> handles = lime::DeviceRegistry::enumerate();
+        if (out != nullptr)
         {
-            const std::string s = handles[i].Serialize();
-            std::strncpy(out[i].str, s.c_str(), sizeof(out[i].str) - 1);
-            out[i].str[sizeof(out[i].str) - 1] = '\0';
+            const size_t n = handles.size() < max ? handles.size() : max;
+            for (size_t i = 0; i < n; ++i)
+            {
+                const std::string s = handles[i].Serialize();
+                std::strncpy(out[i].str, s.c_str(), sizeof(out[i].str) - 1);
+                out[i].str[sizeof(out[i].str) - 1] = '\0';
+            }
         }
+        return static_cast<int>(handles.size());
     }
-    return static_cast<int>(handles.size());
+    LIME_CATCH(lime_OpStatus_Error)
 }
 
 lime_device* lime_device_open(const lime_DeviceHandle* handle)
 {
     if (handle == nullptr)
         return nullptr;
-    const lime::DeviceHandle h{ std::string(handle->str) };
-    return reinterpret_cast<lime_device*>(lime::DeviceRegistry::makeDevice(h));
+    try
+    {
+        const lime::DeviceHandle h{ std::string(handle->str) };
+        return reinterpret_cast<lime_device*>(lime::DeviceRegistry::makeDevice(h));
+    }
+    LIME_CATCH(nullptr)
 }
 
 void lime_device_close(lime_device* dev)
 {
-    if (dev != nullptr)
+    if (dev == nullptr)
+        return;
+    try
+    {
         lime::DeviceRegistry::freeDevice(reinterpret_cast<SDRDevice*>(dev));
+    }
+    LIME_CATCH_VOID
 }
 
 /* Transitional: the only device kind is an SDR, and it is the same pointer. */

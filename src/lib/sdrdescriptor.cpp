@@ -35,22 +35,18 @@ uint32_t lime_descriptor_channel_count(const lime_SDRDescriptor* d, size_t soc)
 
 size_t lime_descriptor_antenna_count(const lime_SDRDescriptor* d, size_t soc, lime_TRXDir dr)
 {
-    if (d == nullptr || soc >= desc(d)->rfSOC.size())
+    if (d == nullptr)
         return 0;
-    const auto& paths = desc(d)->rfSOC[soc].pathNames;
-    const auto it = paths.find(dir(dr));
-    return it != paths.end() ? it->second.size() : 0;
+    const std::vector<std::string>* names = antennaPaths(desc(d), soc, dr);
+    return names != nullptr ? names->size() : 0;
 }
 
 const char* lime_descriptor_antenna_name(const lime_SDRDescriptor* d, size_t soc, lime_TRXDir dr, size_t index)
 {
-    if (d == nullptr || soc >= desc(d)->rfSOC.size())
+    if (d == nullptr)
         return nullptr;
-    const auto& paths = desc(d)->rfSOC[soc].pathNames;
-    const auto it = paths.find(dir(dr));
-    if (it == paths.end() || index >= it->second.size())
-        return nullptr;
-    return it->second[index].c_str();
+    const std::vector<std::string>* names = antennaPaths(desc(d), soc, dr);
+    return (names != nullptr && index < names->size()) ? (*names)[index].c_str() : nullptr;
 }
 
 } /* extern "C" */
