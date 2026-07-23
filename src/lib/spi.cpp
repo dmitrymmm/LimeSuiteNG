@@ -10,8 +10,12 @@ lime_OpStatus lime_spi_transact(lime_SPI* spi, uint32_t bus_address, const uint3
 {
     if (spi == nullptr || (mosi == nullptr && miso == nullptr) || count == 0)
         return lime_OpStatus_InvalidValue;
-    SDRDevice* dev = reinterpret_cast<SDRDevice*>(spi);
-    return static_cast<lime_OpStatus>(dev->SPI(bus_address, mosi, miso, count));
+    try
+    {
+        SDRDevice* dev = reinterpret_cast<SDRDevice*>(spi);
+        return static_cast<lime_OpStatus>(dev->SPI(bus_address, mosi, miso, count));
+    }
+    LIME_CATCH(lime_OpStatus_Error)
 }
 
 } /* extern "C" */
