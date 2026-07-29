@@ -17,6 +17,8 @@
 #include "args.hxx"
 
 #include "DSP/FFT/FFT.h"
+#include "utilities/BIQWriter.h"
+#include <limits>
 #include <stdio.h>
 #include <fcntl.h>
 #include <time.h>
@@ -366,6 +368,8 @@ int main(int argc, char** argv)
     args::NargsValueFlag<int>           chipFlag(parser, "index", "Specify chip index, or index list for aggregation [0,1...]", {'c', "chip"}, args::Nargs{1, static_cast<size_t>(-1)}); // Arg count range [1, size_t::maxValue]
     args::ValueFlag<std::string>        inputFlag(parser, "file path", "Waveform file for samples transmitting", {'i', "input"});
     args::ValueFlag<std::string>        outputFlag(parser, "file path", "Waveform file for received samples", {'o', "output"}, "", args::Options{});
+    args::Flag                          biqFlag(parser, "", "Write received samples as .biq block floating point instead of SigMF", {"biq"});
+    args::ValueFlag<int>                biqBitsFlag(parser, "bits", "biq mantissa bits: 4 survey, 6 general, 8 archive. Default: 6", {"biqBits"}, 6, args::Options{});
     args::Flag                          looptxFlag(parser, "", "Loop tx samples transmission", {"looptx"});
     args::ValueFlag<int64_t>            samplesCountFlag(parser, "sample count", "Number of samples to receive", {'s', "samplesCount"}, 0, args::Options{});
     args::ValueFlag<int64_t>            timeFlag(parser, "ms", "Time duration in milliseconds to receive", {"time"}, 0, args::Options{});
@@ -402,6 +406,13 @@ int main(int argc, char** argv)
     const std::string devName = args::get(deviceFlag);
     const std::string rxFilename = args::get(outputFlag);
     const std::string txFilename = args::get(inputFlag);
+    const bool writeBiq = biqFlag;
+    const int biqMantissaBits = args::get(biqBitsFlag);
+    if (writeBiq && (biqMantissaBits < 2 || biqMantissaBits > 16))
+    {
+        cerr << "--biqBits must be between 2 and 16"sv << endl;
+        return EXIT_FAILURE;
+    }
     const bool rx = true; // Need to always read data to get timestamps - BY DESIGN
     const bool tx = inputFlag || repeaterFlag;
     const bool showFFT = fftFlag;
@@ -585,18 +596,48 @@ int main(int argc, char** argv)
     fftBins[0] = 0;
     std::vector<complex32f_t> samples(fftSize);
 
-    std::ofstream rxFile;
-    if (!rxFilename.empty())
-    {
-        std::cout << "Rx data to file: "sv << rxFilename << std::endl;
-        rxFile.open(rxFilename + ".sigmf-data", std::ofstream::out | std::ofstream::binary);
-    }
-
     float peakAmplitude = 0;
     float peakFrequency = 0;
     if (sampleRate <= 0)
         sampleRate = 1; // sample rate read-back not available, assign default value
     float frequencyLO = 0;
+
+    std::ofstream rxFile;
+    // the biq container carries a single channel, so an aggregated capture gets one file
+    // per channel rather than the interleaved stream the SigMF output writes
+    std::vector<lime::BIQWriter> biqWriters(writeBiq && !rxFilename.empty() ? channelCount : 0);
+    if (!rxFilename.empty())
+    {
+        std::cout << "Rx data to file: "sv << rxFilename << std::endl;
+        if (writeBiq)
+        {
+            lime::BIQWriter::Config biqConfig;
+            biqConfig.sampleRate_Hz = sampleRate;
+            biqConfig.centerFrequency_Hz = device->GetFrequency(chipIndexes.front(), TRXDir::Rx, 0);
+            biqConfig.refFullScale_dBm = std::numeric_limits<double>::quiet_NaN(); // not calibrated
+            biqConfig.mantissaBits = static_cast<uint8_t>(biqMantissaBits);
+            biqConfig.startTime_unix_ns =
+                std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::system_clock::now().time_since_epoch()).count();
+
+            for (int c = 0; c < channelCount; ++c)
+            {
+                const std::string name = channelCount == 1 ? rxFilename + ".biq" : rxFilename + ".ch" + std::to_string(c) + ".biq";
+                const json meta = { { "core:sample_rate", biqConfig.sampleRate_Hz },
+                    { "core:frequency", biqConfig.centerFrequency_Hz },
+                    { "core:version", "0.0.1" },
+                    { "core:recorder", "limeTRX" } };
+                if (biqWriters[c].Open(name, biqConfig, meta.dump()) != OpStatus::Success)
+                {
+                    cerr << "Failed to open output file: "sv << name << endl;
+                    return EXIT_FAILURE;
+                }
+            }
+        }
+        else
+        {
+            rxFile.open(rxFilename + ".sigmf-data", std::ofstream::out | std::ofstream::binary);
+        }
+    }
 
 #ifdef USE_GNU_PLOT
     bool persistPlotWindows = false;
@@ -706,7 +747,12 @@ int main(int argc, char** argv)
                 rxcaptures.push_back({ rxMeta.timestamp, totalSamplesReceived, samplesRead });
             }
 
-            if (channelCount == 1)
+            if (writeBiq)
+            {
+                for (int c = 0; c < channelCount; ++c)
+                    biqWriters[c].Write(rxSamples[c], samplesRead);
+            }
+            else if (channelCount == 1)
             {
                 rxFile.write(reinterpret_cast<char*>(rxSamples[0]), samplesRead * sizeof(lime::complex16_t));
             }
@@ -785,8 +831,11 @@ int main(int argc, char** argv)
     DeviceRegistry::freeDevice(device);
 
     rxFile.close();
+    for (auto& writer : biqWriters)
+        writer.Close();
 
-    if (!rxFilename.empty())
+    // the biq files carry their own header and metadata, no SigMF sidecar is written for them
+    if (!rxFilename.empty() && !writeBiq)
     {
         ofstream rxMetaFile;
         rxMetaFile.open(rxFilename + ".sigmf-meta", std::ofstream::out);
