@@ -6,6 +6,7 @@
 
 #include "ADF4002.h"
 #include "comms/SPI/ISPI.h"
+#include "limesuiteng/Logger.h"
 
 #include <cmath>
 #include <vector>
@@ -297,6 +298,15 @@ void ADF4002::MakeData()
 void ADF4002::CalculateRN()
 {
 
+    // the Euclidean loop below only terminates for positive values. fmod keeps the
+    // sign of its first argument, so a negative one is never reduced and the pair
+    // repeats forever. Zero on both sides would divide by a zero Fcomp instead.
+    if (!(txtFref > 0) || !(txtFvco > 0) || !std::isfinite(txtFref) || !std::isfinite(txtFvco))
+    {
+        lime::error("ADF4002: reference (%g) and VCO (%g) frequencies must be positive", txtFref, txtFvco);
+        return;
+    }
+
     double x = txtFref * 1000000;
     double y = txtFvco * 1000000;
     double Fcomp;
@@ -313,8 +323,23 @@ void ADF4002::CalculateRN()
     };
 
     Fcomp = (x + y) / 1000000.0;
-    int R = std::round(txtFref / Fcomp);
-    int N = std::round(txtFvco / Fcomp);
+    const double R = std::round(txtFref / Fcomp);
+    const double N = std::round(txtFvco / Fcomp);
+
+    // MakeData packs the counters into a 14 bit and a 13 bit field, anything larger
+    // is silently truncated into a completely different divider. The comparison is
+    // made before the conversion to int, because converting an out of range double
+    // is undefined, and the reduction collapses to one ULP for frequency pairs that
+    // have no usable common divisor.
+    if (!(R >= 1 && R <= 16383) || !(N >= 1 && N <= 8191))
+    {
+        lime::error("ADF4002: reference (%g MHz) and VCO (%g MHz) need R=%g N=%g, outside the counter ranges",
+            txtFref,
+            txtFvco,
+            R,
+            N);
+        return;
+    }
 
     txtRCnt = R;
     txtNCnt = N;
