@@ -54,6 +54,12 @@ class LimeSDR : public LMS7002M_SDRDevice
 
     std::unique_ptr<lime::RFStream> StreamCreate(const StreamConfig& config, uint8_t moduleIndex) override;
 
+    /// @brief Aligns the phases of the two Rx channels, see ChannelAlignment.h. Runs
+    /// automatically when a stream is created with StreamConfig::alignPhase set and
+    /// both Rx channels in use. Must not be called while a stream is running.
+    /// @return Success when the channels are aligned.
+    OpStatus AlignRxPhase();
+
   private:
     SDRDescriptor GetDeviceInfo();
     void ResetUSBFIFO();

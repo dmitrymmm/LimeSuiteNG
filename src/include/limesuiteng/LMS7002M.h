@@ -891,16 +891,26 @@ class LIME_API LMS7002M
         RSSI_DC_CONFIG,
     };
 
-  private:
     /*!
      * @brief Sets given module registers to default values
      * @return The status of the operation
      */
     virtual OpStatus SetDefaults(MemorySection module);
 
+    /*!
+     * @brief Takes a snapshot of the whole register map.
+     * @return A newly allocated copy. Pass it to RestoreRegisterMap, which frees it,
+     * or delete it if it is never restored.
+     */
     LMS7002M_RegistersMap* BackupRegisterMap();
+
+    /*!
+     * @brief Writes back a snapshot taken by BackupRegisterMap, restoring every register
+     * that differs from it. Takes ownership of the snapshot and deletes it.
+     */
     void RestoreRegisterMap(LMS7002M_RegistersMap* backup);
 
+  private:
     CGENChangeCallbackType mCallback_onCGENChange;
     void* mCallback_onCGENChange_userData;
 

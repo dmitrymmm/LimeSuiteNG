@@ -1,5 +1,6 @@
 #include "LimeSDR.h"
 
+#include "boards/ChannelAlignment.h"
 #include "limesuiteng/LMS7002M.h"
 #include "limesuiteng/Logger.h"
 
@@ -430,10 +431,38 @@ OpStatus LimeSDR::MemoryRead(std::shared_ptr<DataStorage> storage, Region region
         *mSerialPort, LMS64CProtocol::MEMORY_WR_targets::EEPROM, region.address, data, region.size, 0);
 }
 
+OpStatus LimeSDR::AlignRxPhase()
+{
+    channelalignment::BoardPorts ports;
+    ports.chip = mLMSChips.at(0).get();
+    ports.chipSPI = mlms7002mPort.get();
+    ports.writeFpgaRegister = [this](uint32_t addr, uint32_t value) { mFPGA->WriteRegister(addr, value); };
+    ports.startStreaming = [this]() { mFPGA->StartStreaming(); };
+    ports.stopStreaming = [this]() { mFPGA->StopStreaming(); };
+    ports.resetStreamBuffers = [this]() { ResetUSBFIFO(); };
+    ports.receivePacket = [this](uint8_t* dest, std::size_t length) {
+        constexpr uint8_t rxBulkEndpoint = 0x81;
+        constexpr int32_t timeout_ms = 50;
+        return mStreamPort->BulkTransfer(rxBulkEndpoint, dest, length, timeout_ms) == static_cast<int32_t>(length);
+    };
+
+    channelalignment::RxChannelAligner aligner(ports);
+    return aligner.AlignRxRF();
+}
+
 std::unique_ptr<lime::RFStream> LimeSDR::StreamCreate(const StreamConfig& config, uint8_t moduleIndex)
 {
     constexpr uint8_t rxBulkEndpoint = 0x81;
     constexpr uint8_t txBulkEndpoint = 0x01;
+
+    // matches the legacy behaviour: align when both Rx channels stream and the config
+    // asks for it, warn but still create the stream when the alignment does not settle
+    const auto rxChannels = config.channels.find(TRXDir::Rx);
+    if (config.alignPhase && rxChannels != config.channels.end() && rxChannels->second.size() == 2)
+    {
+        if (AlignRxPhase() != OpStatus::Success)
+            lime::warning("LimeSDR: Rx channel phase alignment failed"s);
+    }
     auto rxdma = std::make_shared<USBDMAEmulation>(mStreamPort, rxBulkEndpoint, DataTransferDirection::DeviceToHost);
     auto txdma = std::make_shared<USBDMAEmulation>(mStreamPort, txBulkEndpoint, DataTransferDirection::HostToDevice);
 
