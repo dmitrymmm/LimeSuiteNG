@@ -575,11 +575,13 @@ OpStatus CustomParameterWrite(ISerialPort& port, const std::vector<CustomParamet
             if (parameters[index].value > 65535.0 && (parameters[index].units != ""s))
                 powerOf10 = log10(parameters[index].value / 65.536) / 3;
 
-            if (parameters[index].value < 65.536 && (parameters[index].units != ""s))
+            // log10 of zero or a negative value is not convertible to int
+            if (parameters[index].value < 65.536 && parameters[index].value > 0 && (parameters[index].units != ""s))
                 powerOf10 = log10(parameters[index].value / 65535.0) / 3;
+            powerOf10 = std::clamp(powerOf10, -8, 7);
 
             int unitsId = 0; // need to convert given units to their enum
-            pkt.payload[byteIndex++] = unitsId << 4 | powerOf10;
+            pkt.payload[byteIndex++] = unitsId << 4 | (powerOf10 & 0x0F);
 
             int value = parameters[index].value / pow(10, 3 * powerOf10);
             pkt.payload[byteIndex++] = (value >> 8);
@@ -1072,6 +1074,13 @@ OpStatus WriteSerialNumber(ISerialPort& port, const std::vector<uint8_t>& serial
         if (packet.status != CommandStatus::Completed)
             return ReportError(OpStatus::Error, "Failed to send one time programming key");
 
+        // the reply overwrote the whole packet; rebuild it from scratch so the
+        // permanent write does not carry stray device-response bytes
+        packet = LMS64CPacket();
+        packet.cmd = Command::SERIAL_WR;
+        packet.blockCount = 1;
+        packet.subDevice = 0;
+
         // key has been sent, continue to send the serial number bytes
         payloadView.SetStorageType(LMS64CPacketSerialCommandView::Storage::OneTimeProgramable);
         payloadView.SetUnlockKey(0x5A);
@@ -1151,6 +1160,9 @@ OpStatus SPI_generic(ISerialPort& port, uint32_t busIndex, uint32_t chipSelect, 
         pkt.cmd = Command::PERIPHSPI_TRNSF;
         pkt.subDevice = 0;
         pkt.periphID = busIndex;
+        // the previous iteration's response filled the payload; clear the whole
+        // preamble so packets after the first don't send stray response bytes
+        memset(pkt.payload, 0, preambleSize);
         pkt.payload[0] = chipSelect;
         pkt.payload[2] = bytesInSPI;
         pkt.status = CommandStatus::Undefined;

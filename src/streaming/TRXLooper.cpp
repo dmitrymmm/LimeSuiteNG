@@ -502,6 +502,9 @@ OpStatus TRXLooper::RxSetup()
     // honor the requested FIFO size (in samples), the pool needs 2 extra packets for staging
     if (mConfig.bufferSize > 0)
         packetsInFIFO = (mConfig.bufferSize + rxPacketSamples - 1) / rxPacketSamples + 2;
+    // low (or absent) sample rate hints produce 0..2 packets; the pool needs the 2
+    // staging packets plus a non-empty FIFO, otherwise capacity()-2 underflows size_t
+    packetsInFIFO = std::max(packetsInFIFO, 4);
     mRx.packetsPool = std::make_unique<MTStack<StreamPacket*>>(packetsInFIFO);
     const uint32_t userSampleSize = mConfig.format == DataFormat::F32 ? sizeof(lime::complex32f_t) : sizeof(lime::complex16_t);
     for (uint32_t i = 0; i < mRx.packetsPool->capacity(); ++i)
@@ -819,6 +822,8 @@ void TRXLooper::ReceivePacketsLoop()
             }
             userPkt->Reset();
             userPkt->meta.timestamp = ExtractPacketTimestamp(mConfig, firstPkt, ticksPerSample);
+            if (mConfig.timestampType == TimestampType::UNIX_EPOCH)
+                userPkt->meta.timestamp = userPkt->meta.timestamp + Timespec(startUnixTime) - fpgaFrontEndDelay;
             userPkt->meta.useTimestamp = true;
             userPkt->meta.flush = false;
         }
@@ -827,6 +832,8 @@ void TRXLooper::ReceivePacketsLoop()
             // packet is being reused after a failed FIFO push; its Reset() zeroed the
             // timestamp, so re-initialize the metadata from this buffer's first packet
             userPkt->meta.timestamp = ExtractPacketTimestamp(mConfig, firstPkt, ticksPerSample);
+            if (mConfig.timestampType == TimestampType::UNIX_EPOCH)
+                userPkt->meta.timestamp = userPkt->meta.timestamp + Timespec(startUnixTime) - fpgaFrontEndDelay;
             userPkt->meta.useTimestamp = true;
             userPkt->meta.flush = false;
         }
@@ -880,12 +887,6 @@ void TRXLooper::ReceivePacketsLoop()
 
             if (mConfig.extraConfig.negateQ)
                 NegateQChannel(userPkt, mConfig.format);
-
-            if (mConfig.timestampType == TimestampType::UNIX_EPOCH)
-            {
-                userPkt->meta.timestamp = userPkt->meta.timestamp + Timespec(startUnixTime);
-                userPkt->meta.timestamp = userPkt->meta.timestamp - fpgaFrontEndDelay;
-            }
         }
 
         assert(userPkt);
@@ -1161,6 +1162,9 @@ OpStatus TRXLooper::TxSetup()
     // honor the requested FIFO size (in samples), the pool needs 2 extra packets for staging
     if (mConfig.bufferSize > 0)
         packetsInFIFO = (mConfig.bufferSize + txPacketSamples - 1) / txPacketSamples + 2;
+    // low (or absent) sample rate hints produce 0..2 packets; the pool needs the 2
+    // staging packets plus a non-empty FIFO, otherwise capacity()-2 underflows size_t
+    packetsInFIFO = std::max(packetsInFIFO, 4);
     mTx.packetsPool = std::make_unique<MTStack<StreamPacket*>>(packetsInFIFO);
     const uint32_t userSampleSize = mConfig.format == DataFormat::F32 ? sizeof(lime::complex32f_t) : sizeof(lime::complex16_t);
     for (uint32_t i = 0; i < mTx.packetsPool->capacity(); ++i)
@@ -1612,7 +1616,7 @@ uint32_t TRXLooper::StreamTxTemplate(
     const bool useTimestamp = meta ? (meta->hasTimestamp) : false;
     const bool flush = meta ? (meta->flags & StreamTxMeta::EndOfBurst) : false;
 
-    Timespec ts = meta->timestamp;
+    Timespec ts = meta ? meta->timestamp : Timespec();
     ts.SetTickRate(ticksPerSample * mConfig.hintSampleRate);
 
     uint32_t samplesRemaining = count;
@@ -1631,7 +1635,9 @@ uint32_t TRXLooper::StreamTxTemplate(
     assert(samples[0]);
     if (useChannelB)
         assert(samples[1]);
-    const T* src[2] = { samples[0], useChannelB ? samples[1] : nullptr };
+    // staging packets are sized for max(Rx, Tx) channels, so with an asymmetric
+    // config the unused channel B plane still gets copied - feed it valid data
+    const T* src[2] = { samples[0], useChannelB ? samples[1] : samples[0] };
     while (samplesRemaining > 0)
     {
         if (!mTx.stagingPacket)
@@ -1647,8 +1653,7 @@ uint32_t TRXLooper::StreamTxTemplate(
 
         int consumed = mTx.stagingPacket->samples.push(src, samplesRemaining);
         src[0] += consumed;
-        if (useChannelB)
-            src[1] += consumed;
+        src[1] += consumed;
 
         samplesRemaining -= consumed;
         ts.AddTicks(consumed * ticksPerSample);

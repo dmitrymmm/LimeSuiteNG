@@ -752,8 +752,6 @@ API_EXPORT int CALL_CONV LMS_DestroyStream(lms_device_t* device, lms_stream_t* s
         return -1;
     }
 
-    // apiDevice->device->StreamDestroy(apiDevice->moduleIndex);
-    apiDevice->stream.reset();
     SubChannelHandle* handle = reinterpret_cast<SubChannelHandle*>(stream->handle);
     if (handle != nullptr)
     {
@@ -761,8 +759,13 @@ API_EXPORT int CALL_CONV LMS_DestroyStream(lms_device_t* device, lms_stream_t* s
         delete handle;
     }
 
+    // all channels of a device share one RFStream; only tear it down once none remain
+    if (apiDevice->streamBuffers[0].maskChannelsSetup == 0 && apiDevice->streamBuffers[1].maskChannelsSetup == 0)
+        apiDevice->stream.reset();
+
     auto& channels = apiDevice->lastSavedStreamConfig.channels.at(stream->isTx ? lime::TRXDir::Tx : lime::TRXDir::Rx);
-    auto iter = std::find(channels.begin(), channels.end(), stream->channel);
+    // setup stored the channel index with the align-phase flag masked off; match that
+    auto iter = std::find(channels.begin(), channels.end(), stream->channel & ~LMS_ALIGN_CH_PHASE);
     if (iter != std::end(channels))
         channels.erase(iter);
 
@@ -848,6 +851,7 @@ int ReceiveStream(lms_stream_t* stream, void* samples, size_t sample_count, lms_
         samplesToReturn = samplesProduced;
         stage->maskDataPresentInBuffer = stage->maskChannelsActive;
         stage->bufferBytesFilled = samplesProduced * sampleSize;
+        stage->timestamp = metadata.timestamp;
     }
 
     // take samples from staging buffer
@@ -1444,7 +1448,12 @@ API_EXPORT int CALL_CONV LMS_ReadParam(lms_device_t* device, struct LMS7Paramete
     }
 
     if (val)
-        *val = apiDevice->device->GetParameter(apiDevice->moduleIndex, 0, param.address, param.msb, param.lsb);
+    {
+        // preserve the chip's current MAC selection instead of forcing channel A
+        const uint16_t mac = apiDevice->device->ReadRegister(apiDevice->moduleIndex, 0x0020) & 0x0003;
+        const uint8_t channel = (mac == 2) ? 1 : 0;
+        *val = apiDevice->device->GetParameter(apiDevice->moduleIndex, channel, param.address, param.msb, param.lsb);
+    }
 
     return 0;
 }
@@ -1457,7 +1466,10 @@ API_EXPORT int CALL_CONV LMS_WriteParam(lms_device_t* device, struct LMS7Paramet
         return -1;
     }
 
-    OpStatus status = apiDevice->device->SetParameter(apiDevice->moduleIndex, 0, param.address, param.msb, param.lsb, val);
+    // preserve the chip's current MAC selection instead of forcing channel A
+    const uint16_t mac = apiDevice->device->ReadRegister(apiDevice->moduleIndex, 0x0020) & 0x0003;
+    const uint8_t channel = (mac == 2) ? 1 : 0;
+    OpStatus status = apiDevice->device->SetParameter(apiDevice->moduleIndex, channel, param.address, param.msb, param.lsb, val);
     return OpStatusToReturnCode(status);
 }
 
@@ -1469,6 +1481,15 @@ API_EXPORT int CALL_CONV LMS_SetNCOFrequency(lms_device_t* device, bool dir_tx, 
         return -1;
     }
     const lime::TRXDir direction = DirFromBool(dir_tx);
+
+    // legacy allowed a null frequency table to mean "set only the phase offset"
+    if (freq == nullptr)
+    {
+        double phaseOffset = 0.0;
+        const double current = apiDevice->device->GetNCOFrequency(apiDevice->moduleIndex, direction, ch, 0, phaseOffset);
+        OpStatus status = apiDevice->device->SetNCOFrequency(apiDevice->moduleIndex, direction, ch, 0, current, pho);
+        return OpStatusToReturnCode(status);
+    }
 
     for (int i = 0; i < LMS_NCO_VAL_COUNT; ++i)
     {
@@ -1491,8 +1512,13 @@ API_EXPORT int CALL_CONV LMS_GetNCOFrequency(lms_device_t* device, bool dir_tx, 
     const lime::TRXDir direction = DirFromBool(dir_tx);
     double phaseOffset = 0.0;
 
+    // freq may be null when the caller only wants the phase offset back
     for (int i = 0; i < LMS_NCO_VAL_COUNT; ++i)
-        freq[i] = apiDevice->device->GetNCOFrequency(apiDevice->moduleIndex, direction, chan, i, phaseOffset);
+    {
+        const double value = apiDevice->device->GetNCOFrequency(apiDevice->moduleIndex, direction, chan, i, phaseOffset);
+        if (freq != nullptr)
+            freq[i] = value;
+    }
 
     if (pho != nullptr)
     {
@@ -1517,17 +1543,27 @@ API_EXPORT int CALL_CONV LMS_SetNCOPhase(lms_device_t* device, bool dir_tx, size
 
     if (phase != nullptr)
     {
+        // select the channel, the raw register writes below bypass SetParameter
+        status = apiDevice->device->SetParameter(apiDevice->moduleIndex, ch, "MAC"s, static_cast<uint16_t>((ch % 2) + 1));
+        if (status != OpStatus::Success)
+            return OpStatusToReturnCode(status);
+
         for (unsigned i = 0; i < LMS_NCO_VAL_COUNT; i++)
         {
             uint16_t addr = dir_tx ? 0x0244 : 0x0444;
-            uint16_t pho = static_cast<uint16_t>(65536 * (phase[i] / 360));
-            apiDevice->device->WriteRegister(apiDevice->moduleIndex, addr + i, pho);
+            // negative phase wraps modulo 2^16, a direct float to uint16_t cast is UB
+            uint16_t pho = static_cast<uint16_t>(std::lround(65536.0 * (phase[i] / 360.0)));
+            status = apiDevice->device->WriteRegister(apiDevice->moduleIndex, addr + i, pho);
+            if (status != OpStatus::Success)
+                return OpStatusToReturnCode(status);
         }
 
         const uint16_t addr = dir_tx ? 0x0240 : 0x0440; // SEL_TX, SEL_RX
         const uint8_t msb = 4;
         const uint8_t lsb = 1;
-        apiDevice->device->SetParameter(apiDevice->moduleIndex, ch, addr, msb, lsb, 0);
+        status = apiDevice->device->SetParameter(apiDevice->moduleIndex, ch, addr, msb, lsb, 0);
+        if (status != OpStatus::Success)
+            return OpStatusToReturnCode(status);
     }
 
     return 0;
@@ -1545,7 +1581,11 @@ API_EXPORT int CALL_CONV LMS_GetNCOPhase(lms_device_t* device, bool dir_tx, size
 
     if (phase != nullptr)
     {
-        apiDevice->device->SetParameter(apiDevice->moduleIndex, ch, "MAC"s, ch);
+        // MAC values are 1 and 2, writing the raw channel index selected the wrong channel
+        const OpStatus status =
+            apiDevice->device->SetParameter(apiDevice->moduleIndex, ch, "MAC"s, static_cast<uint16_t>((ch % 2) + 1));
+        if (status != OpStatus::Success)
+            return OpStatusToReturnCode(status);
 
         for (std::size_t i = 0; i < LMS_NCO_VAL_COUNT; ++i)
         {

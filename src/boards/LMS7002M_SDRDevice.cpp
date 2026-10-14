@@ -412,7 +412,7 @@ void LMS7002M_SDRDevice::StreamDestroy(uint8_t moduleIndex)
 uint32_t LMS7002M_SDRDevice::StreamRx(
     uint8_t moduleIndex, complex32f_t* const* dest, uint32_t count, StreamMeta* meta, std::chrono::microseconds timeout)
 {
-    if (moduleIndex >= mStreamers.size())
+    if (moduleIndex >= mStreamers.size() || !mStreamers.at(moduleIndex))
         return 0;
     return mStreamers.at(moduleIndex)->StreamRx(dest, count, meta, timeout);
 }
@@ -420,7 +420,7 @@ uint32_t LMS7002M_SDRDevice::StreamRx(
 uint32_t LMS7002M_SDRDevice::StreamRx(
     uint8_t moduleIndex, complex16_t* const* dest, uint32_t count, StreamMeta* meta, std::chrono::microseconds timeout)
 {
-    if (moduleIndex >= mStreamers.size())
+    if (moduleIndex >= mStreamers.size() || !mStreamers.at(moduleIndex))
         return 0;
     return mStreamers.at(moduleIndex)->StreamRx(dest, count, meta, timeout);
 }
@@ -428,7 +428,7 @@ uint32_t LMS7002M_SDRDevice::StreamRx(
 uint32_t LMS7002M_SDRDevice::StreamRx(
     uint8_t moduleIndex, complex12_t* const* dest, uint32_t count, StreamMeta* meta, std::chrono::microseconds timeout)
 {
-    if (moduleIndex >= mStreamers.size())
+    if (moduleIndex >= mStreamers.size() || !mStreamers.at(moduleIndex))
         return 0;
     return mStreamers.at(moduleIndex)->StreamRx(dest, count, meta, timeout);
 }
@@ -439,7 +439,7 @@ uint32_t LMS7002M_SDRDevice::StreamTx(uint8_t moduleIndex,
     const StreamMeta* meta,
     std::chrono::microseconds timeout)
 {
-    if (moduleIndex >= mStreamers.size())
+    if (moduleIndex >= mStreamers.size() || !mStreamers.at(moduleIndex))
         return 0;
     return mStreamers.at(moduleIndex)->StreamTx(samples, count, meta, timeout);
 }
@@ -450,7 +450,7 @@ uint32_t LMS7002M_SDRDevice::StreamTx(uint8_t moduleIndex,
     const StreamMeta* meta,
     std::chrono::microseconds timeout)
 {
-    if (moduleIndex >= mStreamers.size())
+    if (moduleIndex >= mStreamers.size() || !mStreamers.at(moduleIndex))
         return 0;
     return mStreamers.at(moduleIndex)->StreamTx(samples, count, meta, timeout);
 }
@@ -461,14 +461,14 @@ uint32_t LMS7002M_SDRDevice::StreamTx(uint8_t moduleIndex,
     const StreamMeta* meta,
     std::chrono::microseconds timeout)
 {
-    if (moduleIndex >= mStreamers.size())
+    if (moduleIndex >= mStreamers.size() || !mStreamers.at(moduleIndex))
         return 0;
     return mStreamers.at(moduleIndex)->StreamTx(samples, count, meta, timeout);
 }
 
 void LMS7002M_SDRDevice::StreamStatus(uint8_t moduleIndex, StreamStats* rx, StreamStats* tx)
 {
-    if (moduleIndex >= mStreamers.size())
+    if (moduleIndex >= mStreamers.size() || !mStreamers[moduleIndex])
         return;
 
     mStreamers[moduleIndex]->StreamStatus(rx, tx);
@@ -809,7 +809,7 @@ void* LMS7002M_SDRDevice::GetInternalChip(uint32_t index)
 
 uint64_t LMS7002M_SDRDevice::GetHardwareTimestamp(uint8_t moduleIndex)
 {
-    if (moduleIndex >= mStreamers.size())
+    if (moduleIndex >= mStreamers.size() || !mStreamers.at(moduleIndex))
         return 0;
     return mStreamers.at(moduleIndex)->GetHardwareTimestamp();
 }
@@ -1360,6 +1360,7 @@ OpStatus LMS7002M_SDRDevice::LMS7002TestSignalConfigure(LMS7002M& chip, const Ch
 {
     LMS7002M::ChannelScope scope(&chip, channelIndex);
     const ChannelConfig& ch = config;
+    OpStatus rxStatus = OpStatus::Success;
     chip.Modify_SPI_Reg_bits(INSEL_RXTSP, ch.rx.testSignal.enabled ? 1 : 0);
     if (ch.rx.testSignal.enabled)
     {
@@ -1371,9 +1372,10 @@ OpStatus LMS7002M_SDRDevice::LMS7002TestSignalConfigure(LMS7002M& chip, const Ch
         chip.Modify_SPI_Reg_bits(TSGMODE_RXTSP, signal.dcMode ? 1 : 0);
         chip.SPI_write(0x040C, 0x01FF); // DC.. bypasss
         // TSGMODE_RXTSP change resets DC values
-        return chip.LoadDC_REG_IQ(TRXDir::Rx, signal.dcValue.real(), signal.dcValue.imag());
+        rxStatus = chip.LoadDC_REG_IQ(TRXDir::Rx, signal.dcValue.real(), signal.dcValue.imag());
     }
 
+    // the Tx test signal is independent of the Rx one, configure it regardless
     chip.Modify_SPI_Reg_bits(INSEL_TXTSP, ch.tx.testSignal.enabled ? 1 : 0);
     if (ch.tx.testSignal.enabled)
     {
@@ -1385,9 +1387,11 @@ OpStatus LMS7002M_SDRDevice::LMS7002TestSignalConfigure(LMS7002M& chip, const Ch
         chip.Modify_SPI_Reg_bits(TSGMODE_TXTSP, signal.dcMode ? 1 : 0);
         chip.SPI_write(0x040C, 0x01FF); // DC.. bypasss
         // TSGMODE_TXTSP change resets DC values
-        return chip.LoadDC_REG_IQ(TRXDir::Tx, signal.dcValue.real(), signal.dcValue.imag());
+        const OpStatus txStatus = chip.LoadDC_REG_IQ(TRXDir::Tx, signal.dcValue.real(), signal.dcValue.imag());
+        if (txStatus != OpStatus::Success)
+            return txStatus;
     }
-    return OpStatus::Success;
+    return rxStatus;
 }
 
 FPGA* LMS7002M_SDRDevice::GetFPGA()

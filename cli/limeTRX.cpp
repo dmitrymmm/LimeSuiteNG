@@ -348,10 +348,25 @@ static void TransmitLoop(TransmitLoopArgs* args)
             }
             if (samplesRemaining <= samplesBatchSize)
                 txMeta.flags = StreamTxMeta::EndOfBurst;
-            int32_t samplesSent = args->stream->Transmit(txSamples, samplesToSend, &txMeta);
-
-            txMeta.timestamp.AddTicks(samplesSent);
-            samplesRemaining -= samplesSent;
+            // Transmit can accept fewer than requested; resend the tail of this chunk
+            // before reading the next one, otherwise the unsent samples are skipped
+            int32_t chunkSent = 0;
+            while (chunkSent < samplesToSend)
+            {
+                complex16_t* offset[16];
+                for (int c = 0; c < args->channelCount; ++c)
+                    offset[c] = txSamples[c] + chunkSent;
+                int32_t samplesSent = args->stream->Transmit(offset, samplesToSend - chunkSent, &txMeta);
+                if (samplesSent <= 0)
+                {
+                    if (args->terminate->load(std::memory_order_relaxed))
+                        break;
+                    continue;
+                }
+                chunkSent += samplesSent;
+                txMeta.timestamp.AddTicks(samplesSent);
+            }
+            samplesRemaining -= chunkSent;
         }
     } while (args->loop && args->terminate->load(std::memory_order_relaxed) == false);
 }
@@ -550,7 +565,14 @@ int main(int argc, char** argv)
                 break;
         }
 
-        stream->Add(device->StreamCreate(streamCfg, index));
+        std::unique_ptr<RFStream> substream = device->StreamCreate(streamCfg, index);
+        if (!substream)
+        {
+            cerr << "Failed to create stream on chip " << index << endl;
+            DeviceRegistry::freeDevice(device);
+            return EXIT_FAILURE;
+        }
+        stream->Add(std::move(substream));
     }
 
     rx_require = rx ? channelCount : 0;
@@ -590,6 +612,12 @@ int main(int argc, char** argv)
     {
         std::cout << "Rx data to file: "sv << rxFilename << std::endl;
         rxFile.open(rxFilename + ".sigmf-data", std::ofstream::out | std::ofstream::binary);
+        if (!rxFile)
+        {
+            cerr << "Failed to open Rx output file: "sv << rxFilename << ".sigmf-data"sv << endl;
+            DeviceRegistry::freeDevice(device);
+            return EXIT_FAILURE;
+        }
     }
 
     float peakAmplitude = 0;

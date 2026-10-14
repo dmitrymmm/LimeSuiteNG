@@ -162,17 +162,10 @@ int main(int argc, char** argv)
         if (!iniFilename.empty())
         {
             config.skipDefaults = true;
-            std::string_view cwd{ argv[0] };
-            const size_t slash0Pos = cwd.find_last_of("/\\"sv);
-            if (slash0Pos != std::string_view::npos)
-            {
-                cwd = cwd.substr(0, slash0Pos);
-            }
-
-            if (iniFilename[0] != '/') // is not global path
-                configFilepath = std::string{ cwd } + "/"s;
-
-            configFilepath += iniFilename;
+            // resolve a relative path against the working directory, the standard CLI
+            // behavior; keying it off argv[0] broke PATH invocation and pointed at the
+            // installed binary's directory
+            configFilepath = iniFilename;
         }
 
         for (int moduleId : chipIndexes)
@@ -187,6 +180,7 @@ int main(int argc, char** argv)
             if (!configFilepath.empty() && chip->LoadConfig(configFilepath) != OpStatus::Success)
             {
                 cerr << "Error loading file: "sv << configFilepath << endl;
+                DeviceRegistry::freeDevice(device);
                 return EXIT_FAILURE;
             }
 
@@ -199,14 +193,20 @@ int main(int argc, char** argv)
             {
                 int rxPathIndex = AntennaNameToIndex(chipDescriptor.pathNames.at(TRXDir::Rx), rxAntennaName);
                 if (rxPathIndex < 0)
+                {
+                    DeviceRegistry::freeDevice(device);
                     return EXIT_FAILURE;
+                }
                 config.channel[0].rx.path = rxPathIndex;
             }
             if (!txAntennaName.empty())
             {
                 int txPathIndex = AntennaNameToIndex(chipDescriptor.pathNames.at(TRXDir::Tx), txAntennaName);
                 if (txPathIndex < 0)
+                {
+                    DeviceRegistry::freeDevice(device);
                     return EXIT_FAILURE;
+                }
                 config.channel[0].tx.path = txPathIndex;
             }
 
@@ -217,6 +217,7 @@ int main(int argc, char** argv)
             if (device->Configure(config, moduleId) != OpStatus::Success)
             {
                 cerr << "Failed to configure device (chip"sv << moduleId << ")"sv << std::endl;
+                DeviceRegistry::freeDevice(device);
                 return EXIT_FAILURE;
             }
         }
