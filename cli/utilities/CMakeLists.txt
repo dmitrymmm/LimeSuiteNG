@@ -14,3 +14,8 @@ set_target_properties(limeChannelAlign PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CM
 target_link_libraries(limeChannelAlign PRIVATE cli-shared)
 target_precompile_headers(limeChannelAlign REUSE_FROM cli-shared)
 target_include_directories(limeChannelAlign PRIVATE "${CMAKE_CURRENT_LIST_DIR}/..")
+
+install(
+    TARGETS limeLOsweep frontendDelayTest limeChannelAlign
+    COMPONENT cli
+    DESTINATION bin)
