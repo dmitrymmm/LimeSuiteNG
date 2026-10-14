@@ -4,6 +4,7 @@
 #include "limesuiteng/SDRDevice.h"
 #include "limesuiteng/StreamConfig.h"
 #include "limesuiteng/complex.h"
+#include "limesuiteng/types.h"
 
 #include <algorithm>
 #include <cmath>
@@ -22,7 +23,11 @@ using namespace std;
 // Hardware verification for the Rx channel phase alignment (issue #356). Feed BOTH Rx
 // inputs the same continuous tone through a splitter, then compare how the phase offset
 // between the channels behaves across repeated stream restarts with and without
-// --align. Each restart re-runs the alignment when it is enabled.
+// --align. Each restart re-runs the alignment when it is enabled. The tone can come from
+// a signal generator, or with --tx from the board itself: Tx channel A then transmits the
+// LMS7002M test signal generator tone, to be cabled through an attenuator and a splitter
+// into both Rx inputs. Only one Tx channel is used so the two Tx test signal generators
+// cannot add their own phase offset to the measurement.
 
 static double PhaseDifferenceDegrees(
     const std::vector<complex16_t>& chA, const std::vector<complex16_t>& chB, std::size_t count, int bin, int fftSize)
@@ -44,7 +49,10 @@ static double PhaseDifferenceDegrees(
     return diff;
 }
 
-static int FindStrongestBin(const std::vector<complex16_t>& samples, std::size_t count, int fftSize)
+// Returns the bin with the most energy and reports its level relative to a full scale
+// tone (complex16_t full scale is 2047) so the signal path can be checked for a usable
+// level without a spectrum display.
+static int FindStrongestBin(const std::vector<complex16_t>& samples, std::size_t count, int fftSize, double* levelDbfs)
 {
     const double pi = std::acos(-1);
     int bestBin = 1;
@@ -66,6 +74,11 @@ static int FindStrongestBin(const std::vector<complex16_t>& samples, std::size_t
             bestBin = bin;
         }
     }
+    if (levelDbfs)
+    {
+        const double fullScale = double(count) * 2047.0;
+        *levelDbfs = bestPower > 0 ? 10.0 * std::log10(bestPower / (fullScale * fullScale)) : -200.0;
+    }
     return bestBin;
 }
 
@@ -79,6 +92,8 @@ int main(int argc, char** argv)
     args::ValueFlag<double>         samplerateFlag(parser, "Hz", "Sample rate. Default: 10 MHz", {'s', "samplerate"}, 10e6);
     args::ValueFlag<int>            runsFlag(parser, "count", "Stream restarts to measure. Default: 10", {'r', "runs"}, 10);
     args::Flag                      alignFlag(parser, "", "Enable the phase alignment on every restart", {'a', "align"});
+    args::Flag                      txFlag(parser, "", "Transmit the tone from Tx channel A with the chip's test signal generator, instead of an external source", {'t', "tx"});
+    args::ValueFlag<double>         txGainFlag(parser, "dB", "Tx gain used with --tx. Default: 40", {"txgain"}, 40);
     // clang-format on
 
     try
@@ -102,6 +117,7 @@ int main(int argc, char** argv)
     const double sampleRate = args::get(samplerateFlag);
     const int runs = args::get(runsFlag);
     const bool align = alignFlag;
+    const bool transmit = txFlag;
 
     SDRConfig config;
     for (int ch = 0; ch < 2; ++ch)
@@ -111,6 +127,22 @@ int main(int argc, char** argv)
         config.channel[ch].rx.sampleRate = sampleRate;
         config.channel[ch].rx.oversample = 2;
         config.channel[ch].rx.path = 2; // LNAL
+    }
+    // Band1 covers the high band, Band2 everything below it (see the default descriptor)
+    const uint8_t txPath = frequency >= 2e9 ? 1 : 2;
+    if (transmit)
+    {
+        ChannelConfig::Direction& tx = config.channel[0].tx;
+        tx.enabled = true;
+        tx.centerFrequency = frequency;
+        tx.sampleRate = sampleRate;
+        tx.oversample = 2;
+        tx.path = txPath;
+        tx.gain[eGainTypes::GENERIC] = args::get(txGainFlag);
+        // NCO tone from the test signal generator, full scale; it lands well inside the Rx
+        // band and away from DC, where the LO leakage is
+        tx.testSignal = ChannelConfig::Direction::TestSignal(
+            true, false, ChannelConfig::Direction::TestSignal::Divide::Div8, ChannelConfig::Direction::TestSignal::Scale::Full);
     }
 
     try
@@ -133,7 +165,11 @@ int main(int argc, char** argv)
     std::vector<complex16_t> chB(fftSize);
 
     cout << "runs: " << runs << ", alignment " << (align ? "ENABLED" : "DISABLED") << endl;
-    cout << "feed the same tone to both Rx inputs through a splitter" << endl;
+    if (transmit)
+        cout << "transmitting the test tone on Tx channel A, " << (txPath == 1 ? "Band1" : "Band2")
+             << " port: connect it through an attenuator (30 dB) and a splitter to both Rx LNAL inputs" << endl;
+    else
+        cout << "feed the same tone to both Rx inputs through a splitter" << endl;
 
     StreamConfig streamConfig;
     streamConfig.channels[TRXDir::Rx] = { 0, 1 };
@@ -167,9 +203,13 @@ int main(int argc, char** argv)
             continue;
         }
 
-        const int bin = FindStrongestBin(chA, got, fftSize);
+        double levelA = 0;
+        double levelB = 0;
+        const int bin = FindStrongestBin(chA, got, fftSize, &levelA);
+        FindStrongestBin(chB, got, fftSize, &levelB);
         const double offset = PhaseDifferenceDegrees(chA, chB, got, bin, fftSize);
-        cout << "run " << run << ": bin " << bin << " phase B-A = " << offset << " deg" << endl;
+        cout << "run " << run << ": bin " << bin << " phase B-A = " << offset << " deg (A " << levelA << " dBFS, B " << levelB
+             << " dBFS)" << endl;
         ++completed;
         sum += offset;
         sumSquares += offset * offset;
